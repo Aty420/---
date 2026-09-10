@@ -12,12 +12,6 @@ class PublishError(RuntimeError):
 
 
 class DouDianSimilarPublisher:
-    """DouDian similar-product RPA.
-
-    It deliberately changes only three fields inherited from the source product:
-    title, first main image and SKU/spec name. CAPTCHA/login verification is never bypassed.
-    """
-
     def __init__(self, page: Page, selector_file: Path, screenshot_dir: Path, step_cb: Callable[[str, int], None] | None = None):
         self.page = page
         self.selector_file = selector_file
@@ -64,12 +58,12 @@ class DouDianSimilarPublisher:
         raise PublishError(f"未找到页面元素：{key}。请在 config/selectors.json 校准该节点。")
 
     def click(self, key: str, timeout=8000):
-        loc = self.locator(key, timeout=min(timeout, 1800))
+        loc = self.locator(key, timeout=min(timeout, 2200))
         loc.click(timeout=timeout)
         return loc
 
     def fill(self, key: str, value: str, timeout=8000):
-        loc = self.locator(key, timeout=min(timeout, 1800))
+        loc = self.locator(key, timeout=min(timeout, 2200))
         loc.fill(value, timeout=timeout)
         return loc
 
@@ -77,68 +71,70 @@ class DouDianSimilarPublisher:
         self.page.wait_for_timeout(ms)
 
     def screenshot_error(self, task_code: str):
-        safe = "".join(ch for ch in task_code if ch.isalnum() or ch in "_-" ) or "task"
+        safe = "".join(ch for ch in task_code if ch.isalnum() or ch in "_-") or "task"
         path = self.screenshot_dir / f"{safe}_error.png"
         self.page.screenshot(path=str(path), full_page=True)
         return path
 
-    # ---------- Recorded workflow ----------
+    def _has_source_search(self, timeout=2000) -> bool:
+        try:
+            self.locator("source_search_input", timeout=timeout)
+            return True
+        except PublishError:
+            return False
+
+    # V2.0.2: match the actual DouDian merchant home shown by the user.
     def open_product_list(self):
         self.step("进入商品管理", 8)
         self.wait_page_ready(500)
 
-        # V2.0.1:
-        # Keep the user's current merchant page instead of forcing a jump to the public root.
-        # If the user has already opened 商品管理/商品列表, start directly from the search box.
-        try:
-            self.locator("source_search_input", timeout=2800)
+        # 1) Already on product list -> do nothing.
+        if self._has_source_search(1800):
             self.step("已在商品列表", 12)
             return
-        except PublishError:
+
+        # 2) On merchant home, 商品管理 is already visible in the left sidebar.
+        #    Click it directly; do NOT require clicking the 商品 parent first.
+        try:
+            self.click("product_list", timeout=10000)
+            self.wait_page_ready(1400)
+            if self._has_source_search(4500):
+                self.step("已进入商品列表", 12)
+                return
+        except Exception:
             pass
 
-        # If not already on the list page, try the current merchant-side navigation.
+        # 3) Fallback for accounts where 商品 is collapsed.
         try:
-            self.click("nav_product", timeout=10000)
+            self.click("nav_product", timeout=8000)
             self.wait_page_ready(500)
-        except PublishError as exc:
-            raise PublishError(
-                "当前页面未检测到商品列表搜索框，也未找到商品导航。"
-                "请先在软件打开的抖店浏览器中人工进入 商品→商品管理/商品列表，保持该页面后重试。"
-            ) from exc
-
-        # Some accounts land directly on the list after clicking 商品.
-        try:
-            self.locator("source_search_input", timeout=2200)
-            return
-        except PublishError:
+        except Exception:
             pass
 
-        # Other accounts require a second-level 商品管理/商品列表 click.
         try:
-            self.click("product_list", timeout=8000)
-        except PublishError:
+            self.click("product_list", timeout=10000)
+            self.wait_page_ready(1400)
+            if self._has_source_search(4500):
+                self.step("已进入商品列表", 12)
+                return
+        except Exception:
             pass
-        self.wait_page_ready(800)
 
-        try:
-            self.locator("source_search_input", timeout=3500)
-        except PublishError as exc:
-            raise PublishError(
-                "已进入商品相关页面，但仍未检测到商品列表搜索框 source_search_input。"
-                "请保持商品列表页并提供失败截图，以便校准搜索框。"
-            ) from exc
+        raise PublishError(
+            "未能进入商品管理页：当前已登录，但自动点击“商品管理”后仍未检测到商品列表搜索框。"
+            "请手动点击左侧“商品管理”，停留在商品列表页后重试；若仍失败，请提供该页面截图。"
+        )
 
     def search_source_product(self, keyword: str):
         self.step("搜索源商品", 18)
-        box = self.locator("source_search_input", timeout=2200)
+        box = self.locator("source_search_input", timeout=3500)
         box.fill("")
         box.fill(keyword)
         try:
             self.click("source_search_button", timeout=5000)
         except PublishError:
             box.press("Enter")
-        self.wait_page_ready(1100)
+        self.wait_page_ready(1200)
 
         row = self.page.locator("tr").filter(has_text=keyword).first
         try:
@@ -155,20 +151,20 @@ class DouDianSimilarPublisher:
             for txt in self._cfg("similar_publish_row_texts").get("values", ["发布相似品", "相似品"]):
                 try:
                     btn = row.get_by_text(txt, exact=False).first
-                    btn.wait_for(state="visible", timeout=1000)
+                    btn.wait_for(state="visible", timeout=1200)
                     btn.click()
-                    self.wait_page_ready(600)
+                    self.wait_page_ready(700)
                     return
                 except Exception:
                     pass
             for txt in self._cfg("row_more_texts").get("values", ["更多", "操作"]):
                 try:
                     btn = row.get_by_text(txt, exact=False).first
-                    btn.wait_for(state="visible", timeout=1000)
+                    btn.wait_for(state="visible", timeout=1200)
                     btn.click()
-                    self.wait_page_ready(300)
+                    self.wait_page_ready(350)
                     self.click("similar_publish_entry", timeout=5000)
-                    self.wait_page_ready(700)
+                    self.wait_page_ready(800)
                     return
                 except Exception:
                     pass
@@ -178,7 +174,7 @@ class DouDianSimilarPublisher:
         except PublishError:
             self.click("row_more_button", timeout=5000)
             self.click("similar_publish_entry", timeout=5000)
-        self.wait_page_ready(800)
+        self.wait_page_ready(900)
 
     def wait_edit_page(self):
         self.step("等待相似品编辑页", 36)
