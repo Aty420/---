@@ -1,0 +1,74 @@
+{
+  "nav_product": {
+    "candidates": [
+      {"kind": "text", "value": "商品", "exact": true},
+      {"kind": "text", "value": "商品管理", "exact": false}
+    ]
+  },
+  "product_list": {
+    "candidates": [
+      {"kind": "text", "value": "商品管理", "exact": false},
+      {"kind": "text", "value": "商品列表", "exact": false}
+    ]
+  },
+  "source_search_input": {
+    "candidates": [
+      {"kind": "placeholder", "value": "商品ID", "exact": false},
+      {"kind": "placeholder", "value": "商品名称", "exact": false},
+      {"kind": "placeholder", "value": "请输入商品", "exact": false}
+    ]
+  },
+  "source_search_button": {
+    "candidates": [
+      {"kind": "role", "role": "button", "value": "搜索", "exact": false},
+      {"kind": "text", "value": "搜索", "exact": true},
+      {"kind": "text", "value": "查询", "exact": true}
+    ]
+  },
+  "row_more_button": {
+    "candidates": [
+      {"kind": "text", "value": "更多", "exact": false},
+      {"kind": "text", "value": "操作", "exact": false}
+    ]
+  },
+  "row_more_texts": {"values": ["更多", "操作"]},
+  "similar_publish_row_texts": {"values": ["发布相似品", "相似品"]},
+  "similar_publish_entry": {
+    "candidates": [
+      {"kind": "text", "value": "发布相似品", "exact": false},
+      {"kind": "text", "value": "发布相似商品", "exact": false}
+    ]
+  },
+  "title_input": {
+    "candidates": [
+      {"kind": "placeholder", "value": "请输入商品标题", "exact": false},
+      {"kind": "css", "value": "input[maxlength='60']"}
+    ]
+  },
+  "first_main_image_input": {
+    "css": "input[type='file'][accept*='image']",
+    "index": 0
+  },
+  "first_main_image_replace": {
+    "candidates": [
+      {"kind": "text", "value": "替换", "exact": false},
+      {"kind": "text", "value": "重新上传", "exact": false},
+      {"kind": "text", "value": "更换", "exact": false}
+    ]
+  },
+  "sku_name_input": {
+    "candidates": [
+      {"kind": "placeholder", "value": "请输入规格值", "exact": false},
+      {"kind": "placeholder", "value": "规格名称", "exact": false},
+      {"kind": "placeholder", "value": "请输入规格", "exact": false}
+    ]
+  },
+  "publish_button": {
+    "candidates": [
+      {"kind": "role", "role": "button", "value": "发布商品", "exact": false},
+      {"kind": "text", "value": "发布商品", "exact": false},
+      {"kind": "text", "value": "提交审核", "exact": false}
+    ]
+  },
+  "publish_success_texts": {"values": ["商品提交成功", "提交成功", "发布成功"]}
+}

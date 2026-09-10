@@ -1,0 +1,15 @@
+DouRPA Pro：生成 EXE 安装包（最简单方法）
+
+1. 解压本压缩包。
+2. 打开你的 GitHub 仓库：https://github.com/Aty420/---
+3. 点击 Add file → Upload files。
+4. 把“DouRPA-Windows-Build”文件夹里面的全部文件和文件夹拖进去。
+   重点确认 .github/workflows/build-windows.yml 也上传成功。
+5. 页面底部点击 Commit changes。
+6. 点击仓库顶部 Actions。
+7. 等待 “Build Windows Installer” 变成绿色对勾。
+8. 点开这次运行，在页面最底部 Artifacts 下载：DouRPA-Windows-Installer。
+9. 下载的是 ZIP，解压后里面就是 DouRPA_Setup.exe。
+10. 双击 DouRPA_Setup.exe 安装，安装后桌面会生成 DouRPA Pro 图标。
+
+如果 Actions 变红，把失败页面截图发给 ChatGPT，不需要重新录制上架视频。
