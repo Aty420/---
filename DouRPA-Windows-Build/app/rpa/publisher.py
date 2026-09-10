@@ -12,7 +12,21 @@ class PublishError(RuntimeError):
 
 
 class DouDianSimilarPublisher:
-    def __init__(self, page: Page, selector_file: Path, screenshot_dir: Path, step_cb: Callable[[str, int], None] | None = None):
+    """抖店发布相似品 RPA。
+
+    V2.0.3 关键修复：
+    1. 每次任务开始自动重新绑定当前/最新抖店标签页，避免操作旧 page。
+    2. 点击可能打开新标签页后，再次自动绑定最新标签页并 bring_to_front。
+    3. selector 不再只取 .first，而是遍历多个匹配项，优先真正可见元素。
+    """
+
+    def __init__(
+        self,
+        page: Page,
+        selector_file: Path,
+        screenshot_dir: Path,
+        step_cb: Callable[[str, int], None] | None = None
+    ):
         self.page = page
         self.selector_file = selector_file
         self.screenshot_dir = screenshot_dir
@@ -26,6 +40,29 @@ class DouDianSimilarPublisher:
     def _cfg(self, key: str) -> dict:
         return self.selectors.get(key, {})
 
+    def _sync_active_page(self):
+        """重新绑定当前 context 中最新的抖店页面，并切到前台。"""
+        try:
+            pages = [p for p in self.page.context.pages if not p.is_closed()]
+        except Exception:
+            pages = []
+
+        if not pages:
+            raise PublishError("浏览器中没有可用页面。")
+
+        # 优先选择最新打开的抖店/巨量商家页面。
+        preferred = [
+            p for p in pages
+            if ("jinritemai.com" in (p.url or "") or "douyin.com" in (p.url or ""))
+        ]
+        self.page = preferred[-1] if preferred else pages[-1]
+
+        try:
+            self.page.bring_to_front()
+        except Exception:
+            pass
+        return self.page
+
     def _candidate_locator(self, candidate: dict):
         kind = candidate.get("kind", "text")
         value = candidate.get("value", "")
@@ -37,105 +74,162 @@ class DouDianSimilarPublisher:
         if kind == "label":
             return self.page.get_by_label(value, exact=exact)
         if kind == "role":
-            return self.page.get_by_role(candidate.get("role", "button"), name=value, exact=exact)
+            return self.page.get_by_role(
+                candidate.get("role", "button"),
+                name=value,
+                exact=exact
+            )
         if kind == "css":
             return self.page.locator(value)
         raise PublishError(f"不支持的 selector 类型: {kind}")
 
-    def locator(self, key: str, timeout=1200):
+    def locator(self, key: str, timeout=1500):
         cfg = self._cfg(key)
         candidates = list(cfg.get("candidates") or [])
+
         for k in ("css", "placeholder", "text"):
             if cfg.get(k):
                 candidates.append({"kind": k, "value": cfg[k]})
+
         for cand in candidates:
             try:
-                loc = self._candidate_locator(cand).first
-                loc.wait_for(state="visible", timeout=timeout)
-                return loc
+                group = self._candidate_locator(cand)
+                count = min(group.count(), 12)
             except Exception:
                 continue
-        raise PublishError(f"未找到页面元素：{key}。请在 config/selectors.json 校准该节点。")
+
+            for i in range(count):
+                try:
+                    loc = group.nth(i)
+                    if loc.is_visible(timeout=timeout):
+                        return loc
+                except Exception:
+                    continue
+
+        raise PublishError(
+            f"未找到页面元素：{key}。请在 config/selectors.json 校准该节点。"
+        )
 
     def click(self, key: str, timeout=8000):
         loc = self.locator(key, timeout=min(timeout, 2200))
+        try:
+            loc.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
         loc.click(timeout=timeout)
-        return loc
-
-    def fill(self, key: str, value: str, timeout=8000):
-        loc = self.locator(key, timeout=min(timeout, 2200))
-        loc.fill(value, timeout=timeout)
         return loc
 
     def wait_page_ready(self, ms=700):
         self.page.wait_for_timeout(ms)
 
     def screenshot_error(self, task_code: str):
+        self._sync_active_page()
         safe = "".join(ch for ch in task_code if ch.isalnum() or ch in "_-") or "task"
         path = self.screenshot_dir / f"{safe}_error.png"
         self.page.screenshot(path=str(path), full_page=True)
         return path
 
-    def _has_source_search(self, timeout=2000) -> bool:
+    def _has_source_search(self, timeout=2200) -> bool:
         try:
             self.locator("source_search_input", timeout=timeout)
             return True
         except PublishError:
             return False
 
-    # V2.0.2: match the actual DouDian merchant home shown by the user.
-    def open_product_list(self):
-        self.step("进入商品管理", 8)
-        self.wait_page_ready(500)
+    def _click_product_management_directly(self):
+        """针对用户当前抖店首页，直接点击可见的“商品管理”。"""
+        # 先按配置找
+        try:
+            self.click("product_list", timeout=8000)
+            return
+        except Exception:
+            pass
 
-        # 1) Already on product list -> do nothing.
+        # 再精确遍历页面上所有“商品管理”
+        try:
+            items = self.page.get_by_text("商品管理", exact=True)
+            count = min(items.count(), 12)
+            for i in range(count):
+                item = items.nth(i)
+                try:
+                    if not item.is_visible(timeout=500):
+                        continue
+                    item.scroll_into_view_if_needed(timeout=1500)
+                    item.click(timeout=5000)
+                    return
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        raise PublishError("页面上没有找到可点击的“商品管理”。")
+
+    def open_product_list(self):
+        self.step("绑定当前抖店标签页", 5)
+        self._sync_active_page()
+        self.wait_page_ready(400)
+
+        # 已经在商品列表页
         if self._has_source_search(1800):
             self.step("已在商品列表", 12)
             return
 
-        # 2) On merchant home, 商品管理 is already visible in the left sidebar.
-        #    Click it directly; do NOT require clicking the 商品 parent first.
+        # 用户当前首页已显示“商品管理”，直接点击
+        self.step("点击商品管理", 8)
         try:
-            self.click("product_list", timeout=10000)
-            self.wait_page_ready(1400)
-            if self._has_source_search(4500):
-                self.step("已进入商品列表", 12)
-                return
+            self._click_product_management_directly()
+        except Exception as exc:
+            raise PublishError(
+                f"未能点击“商品管理”。当前页面：{self.page.url}"
+            ) from exc
+
+        self.wait_page_ready(1000)
+
+        # 商品管理有可能打开新 tab，必须重新绑定
+        self._sync_active_page()
+        self.wait_page_ready(600)
+
+        if self._has_source_search(5000):
+            self.step("已进入商品列表", 12)
+            return
+
+        # 兜底：有的账号先点“商品”父菜单再出现二级菜单
+        try:
+            self.step("展开商品菜单", 9)
+            self.click("nav_product", timeout=6000)
+            self.wait_page_ready(400)
+            self._click_product_management_directly()
+            self.wait_page_ready(900)
+            self._sync_active_page()
         except Exception:
             pass
 
-        # 3) Fallback for accounts where 商品 is collapsed.
-        try:
-            self.click("nav_product", timeout=8000)
-            self.wait_page_ready(500)
-        except Exception:
-            pass
-
-        try:
-            self.click("product_list", timeout=10000)
-            self.wait_page_ready(1400)
-            if self._has_source_search(4500):
-                self.step("已进入商品列表", 12)
-                return
-        except Exception:
-            pass
+        if self._has_source_search(5000):
+            self.step("已进入商品列表", 12)
+            return
 
         raise PublishError(
-            "未能进入商品管理页：当前已登录，但自动点击“商品管理”后仍未检测到商品列表搜索框。"
-            "请手动点击左侧“商品管理”，停留在商品列表页后重试；若仍失败，请提供该页面截图。"
+            "已经执行“商品管理”点击，但目标页面没有识别到商品列表搜索框。"
+            f" 当前URL：{self.page.url}"
         )
 
     def search_source_product(self, keyword: str):
+        self._sync_active_page()
         self.step("搜索源商品", 18)
-        box = self.locator("source_search_input", timeout=3500)
+
+        box = self.locator("source_search_input", timeout=4000)
         box.fill("")
         box.fill(keyword)
+
         try:
             self.click("source_search_button", timeout=5000)
         except PublishError:
             box.press("Enter")
-        self.wait_page_ready(1200)
 
+        self.wait_page_ready(1200)
+        self._sync_active_page()
+
+        # 表格行优先
         row = self.page.locator("tr").filter(has_text=keyword).first
         try:
             row.wait_for(state="visible", timeout=3500)
@@ -148,15 +242,19 @@ class DouDianSimilarPublisher:
         row = self.search_source_product(keyword)
 
         if row is not None:
-            for txt in self._cfg("similar_publish_row_texts").get("values", ["发布相似品", "相似品"]):
+            for txt in self._cfg("similar_publish_row_texts").get(
+                "values", ["发布相似品", "相似品"]
+            ):
                 try:
                     btn = row.get_by_text(txt, exact=False).first
                     btn.wait_for(state="visible", timeout=1200)
                     btn.click()
                     self.wait_page_ready(700)
+                    self._sync_active_page()
                     return
                 except Exception:
                     pass
+
             for txt in self._cfg("row_more_texts").get("values", ["更多", "操作"]):
                 try:
                     btn = row.get_by_text(txt, exact=False).first
@@ -165,6 +263,7 @@ class DouDianSimilarPublisher:
                     self.wait_page_ready(350)
                     self.click("similar_publish_entry", timeout=5000)
                     self.wait_page_ready(800)
+                    self._sync_active_page()
                     return
                 except Exception:
                     pass
@@ -174,20 +273,25 @@ class DouDianSimilarPublisher:
         except PublishError:
             self.click("row_more_button", timeout=5000)
             self.click("similar_publish_entry", timeout=5000)
+
         self.wait_page_ready(900)
+        self._sync_active_page()
 
     def wait_edit_page(self):
+        self._sync_active_page()
         self.step("等待相似品编辑页", 36)
         self.locator("title_input", timeout=12000)
         self.wait_page_ready(500)
 
     def replace_title(self, new_title: str):
         self.step("修改商品标题", 46)
-        self.fill("title_input", new_title, timeout=10000)
+        loc = self.locator("title_input", timeout=3500)
+        loc.fill(new_title, timeout=10000)
 
     def replace_first_main_image(self, image_path: str):
         self.step("替换第一张主图", 60)
         image = Path(image_path)
+
         if not image.exists() or not image.is_file():
             raise PublishError(f"新首图不存在：{image}")
         if image.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
@@ -210,23 +314,27 @@ class DouDianSimilarPublisher:
                 self.click("first_main_image_replace", timeout=6500)
             chooser_info.value.set_files(str(image))
             self.wait_page_ready(900)
-            return
         except Exception as exc:
-            raise PublishError("首图替换控件未定位成功，请校准 first_main_image_input / first_main_image_replace") from exc
+            raise PublishError(
+                "首图替换控件未定位成功，请校准 "
+                "first_main_image_input / first_main_image_replace"
+            ) from exc
 
     def replace_sku_name(self, sku_name: str):
         self.step("修改 SKU 名称", 74)
-        loc = self.locator("sku_name_input", timeout=4500)
+        loc = self.locator("sku_name_input", timeout=5000)
         loc.fill("")
         loc.fill(sku_name)
         self.wait_page_ready(350)
 
     def preflight_guard(self, expected_title: str, expected_sku: str):
         self.step("发布前校验", 84)
-        title = self.locator("title_input", timeout=2500).input_value().strip()
+
+        title = self.locator("title_input", timeout=3000).input_value().strip()
         if title != expected_title.strip():
             raise PublishError("发布前校验失败：商品标题与任务数据不一致")
-        sku = self.locator("sku_name_input", timeout=2500).input_value().strip()
+
+        sku = self.locator("sku_name_input", timeout=3000).input_value().strip()
         if sku != expected_sku.strip():
             raise PublishError("发布前校验失败：SKU 名称与任务数据不一致")
 
@@ -238,30 +346,45 @@ class DouDianSimilarPublisher:
         self.step("提交发布", 92)
         self.click("publish_button", timeout=12000)
         self.wait_page_ready(800)
-        success_texts = self._cfg("publish_success_texts").get("values", ["商品提交成功", "提交成功", "发布成功"])
+        self._sync_active_page()
+
+        success_texts = self._cfg("publish_success_texts").get(
+            "values", ["商品提交成功", "提交成功", "发布成功"]
+        )
         for text in success_texts:
             try:
-                self.page.get_by_text(text, exact=False).first.wait_for(state="visible", timeout=15000)
+                self.page.get_by_text(text, exact=False).first.wait_for(
+                    state="visible", timeout=15000
+                )
                 self.step("发布成功", 100)
                 return "成功", text
             except Exception:
                 continue
-        raise PublishError("已点击发布，但未检测到“商品提交成功”等成功反馈，请人工检查页面。")
+
+        raise PublishError(
+            "已点击发布，但未检测到“商品提交成功”等成功反馈，请人工检查页面。"
+        )
 
     def run(self, task: dict, template: dict, safe_mode=True):
         code = str(task.get("task_code", "task"))
         try:
+            self._sync_active_page()
             self.open_product_list()
             self.open_similar_product(str(template["source_keyword"]))
             self.wait_edit_page()
             self.replace_title(str(task["new_title"]))
             self.replace_first_main_image(str(task["cover_image"]))
             self.replace_sku_name(str(task["sku_name"]))
-            self.preflight_guard(str(task["new_title"]), str(task["sku_name"]))
+            self.preflight_guard(
+                str(task["new_title"]),
+                str(task["sku_name"])
+            )
             return self.submit(safe_mode)
+
         except PlaywrightTimeoutError as exc:
             shot = self.screenshot_error(code)
             raise PublishError(f"页面等待超时，已截图：{shot}") from exc
+
         except Exception:
             try:
                 self.screenshot_error(code)
