@@ -43,4 +43,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: DouRPA-Windows-Installer
-          path: DouRPA-Windows-Build\installer\output\DouRPA_Setup.exe
+          path: DouRPA-Windows-Build\installer-output\DouRPA_Setup.exe
