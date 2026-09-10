@@ -25,7 +25,7 @@ CloseApplications=yes
 RestartApplications=no
 
 [Languages]
-Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "..\dist\DouRPA\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
