@@ -12,7 +12,7 @@ class PublishError(RuntimeError):
 
 
 class DouDianSimilarPublisher:
-    """抖店发布相似品 RPA - V2.0.4"""
+    """抖店发布相似品 RPA - V2.0.5"""
 
     def __init__(self, page: Page, selector_file: Path, screenshot_dir: Path,
                  step_cb: Callable[[str, int], None] | None = None):
@@ -74,7 +74,7 @@ class DouDianSimilarPublisher:
         for cand in candidates:
             try:
                 group = self._candidate_locator(cand)
-                count = min(group.count(), 12)
+                count = min(group.count(), 20)
             except Exception:
                 continue
 
@@ -107,6 +107,175 @@ class DouDianSimilarPublisher:
         self.page.screenshot(path=str(path), full_page=True)
         return path
 
+    def diagnostic_summary(self) -> str:
+        try:
+            inputs = self.page.locator("input")
+            textareas = self.page.locator("textarea")
+            contents = self.page.locator("[contenteditable='true']")
+            return (
+                f"URL={self.page.url}; "
+                f"input={inputs.count()}; textarea={textareas.count()}; "
+                f"contenteditable={contents.count()}"
+            )
+        except Exception:
+            return f"URL={getattr(self.page, 'url', '')}"
+
+    def _visible_controls_in_ancestor(self, text: str, exact=True):
+        """从字段标签向上找表单容器，再找其中的可编辑控件。"""
+        labels = self.page.get_by_text(text, exact=exact)
+        try:
+            count = min(labels.count(), 15)
+        except Exception:
+            count = 0
+
+        results = []
+        for i in range(count):
+            label = labels.nth(i)
+            try:
+                if not label.is_visible(timeout=400):
+                    continue
+            except Exception:
+                continue
+
+            # 从标签父级开始最多向上 5 层，适配抖店动态表单结构
+            for depth in range(1, 6):
+                xpath = "/.." * depth
+                try:
+                    ancestor = label.locator("xpath=" + xpath)
+                    controls = ancestor.locator(
+                        "input:not([type='hidden']):not([disabled]), "
+                        "textarea:not([disabled]), "
+                        "[contenteditable='true']"
+                    )
+                    c = min(controls.count(), 20)
+                except Exception:
+                    continue
+
+                for j in range(c):
+                    ctl = controls.nth(j)
+                    try:
+                        if not ctl.is_visible(timeout=300):
+                            continue
+                        box = ctl.bounding_box()
+                        if not box or box["width"] < 80 or box["height"] < 18:
+                            continue
+                        key = (
+                            round(box["x"]), round(box["y"]),
+                            round(box["width"]), round(box["height"])
+                        )
+                        if all(r[0] != key for r in results):
+                            results.append((key, ctl, depth))
+                    except Exception:
+                        continue
+
+                if results:
+                    return results
+        return results
+
+    def _title_input(self):
+        self._sync_active_page()
+
+        # 1) 先尝试旧配置，保持兼容
+        try:
+            return self.locator("title_input", timeout=900)
+        except Exception:
+            pass
+
+        # 2) 根据截图中的字段名“商品标题”做相对定位
+        controls = self._visible_controls_in_ancestor("商品标题", exact=True)
+        if controls:
+            # 商品标题框是该行最宽的可编辑控件，优先选宽度最大的
+            controls.sort(key=lambda x: x[0][2], reverse=True)
+            return controls[0][1]
+
+        # 3) 兜底：找页面顶部基础信息区域的长文本框
+        candidates = self.page.locator(
+            "input:not([type='hidden']):not([disabled]), textarea:not([disabled])"
+        )
+        found = []
+        try:
+            count = min(candidates.count(), 80)
+        except Exception:
+            count = 0
+
+        for i in range(count):
+            loc = candidates.nth(i)
+            try:
+                if not loc.is_visible(timeout=250):
+                    continue
+                box = loc.bounding_box()
+                if not box or box["width"] < 350:
+                    continue
+                val = ""
+                try:
+                    val = loc.input_value().strip()
+                except Exception:
+                    pass
+                # 标题截图中是较长已有文本，优先有内容的宽输入框
+                if len(val) >= 8:
+                    found.append((box["y"], -box["width"], loc))
+            except Exception:
+                continue
+
+        if found:
+            found.sort(key=lambda x: (x[0], x[1]))
+            return found[0][2]
+
+        raise PublishError(
+            "未能定位“商品标题”输入框。"
+            + self.diagnostic_summary()
+        )
+
+    def _sku_value_input(self):
+        self._sync_active_page()
+
+        # 根据截图：商品规格 > 包装规格 > 已有规格值
+        controls = self._visible_controls_in_ancestor("包装规格", exact=True)
+
+        scored = []
+        for key, ctl, depth in controls:
+            try:
+                tag = ctl.evaluate("(e)=>e.tagName.toLowerCase()")
+            except Exception:
+                tag = ""
+            try:
+                placeholder = ctl.get_attribute("placeholder") or ""
+            except Exception:
+                placeholder = ""
+            try:
+                value = ctl.input_value().strip() if tag in ("input", "textarea") else (ctl.inner_text() or "").strip()
+            except Exception:
+                value = ""
+
+            # 排除截图中“填写并新增规格值”的新增框
+            if "新增规格" in placeholder or "新增规格值" in placeholder:
+                continue
+
+            score = 0
+            if value:
+                score += 100
+            if len(value) >= 4:
+                score += 50
+            if key[2] >= 140:
+                score += 10
+            score -= depth
+            scored.append((score, ctl))
+
+        if scored:
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return scored[0][1]
+
+        # 兼容旧 placeholder 方案
+        try:
+            return self.locator("sku_name_input", timeout=1200)
+        except Exception:
+            pass
+
+        raise PublishError(
+            "未能定位“包装规格”已有规格值输入框。"
+            + self.diagnostic_summary()
+        )
+
     def _has_source_search(self, timeout=2200) -> bool:
         try:
             self.locator("source_search_input", timeout=timeout)
@@ -131,7 +300,6 @@ class DouDianSimilarPublisher:
                 return loc
             except Exception as exc:
                 last_exc = exc
-                continue
         raise PublishError(f"未找到可点击文字：{text}") from last_exc
 
     def _click_product_management_directly(self):
@@ -208,11 +376,9 @@ class DouDianSimilarPublisher:
             return None
 
     def _handle_similar_confirm_dialog(self):
-        """V2.0.4: 处理“请确认要进行的操作”二次弹窗。"""
         self._sync_active_page()
         self.wait_page_ready(350)
 
-        # 没有弹窗时直接返回，兼容旧版后台。
         try:
             title = self.page.get_by_text("请确认要进行的操作", exact=False).first
             title.wait_for(state="visible", timeout=1800)
@@ -221,8 +387,6 @@ class DouDianSimilarPublisher:
 
         self.step("确认发布相似品", 32)
 
-        # 弹窗中会同时显示“发布相似品”和“设置渠道品”。
-        # 必须主动点击“发布相似品”，不能依赖默认选中项。
         texts = self.page.get_by_text("发布相似品", exact=True)
         clicked = False
         try:
@@ -230,16 +394,10 @@ class DouDianSimilarPublisher:
         except Exception:
             count = 0
 
-        # 优先从后往前找，因为弹窗通常是 DOM 中后插入的元素，
-        # 可避免误点弹窗背后的商品列表操作链接。
         for i in range(count - 1, -1, -1):
-            loc = texts.nth(i)
             try:
-                if not loc.is_visible(timeout=400):
-                    continue
-                box = loc.bounding_box()
-                # 弹窗中的卡片位于页面中部；列表操作通常在右侧。
-                if box and box["x"] < self.page.viewport_size["width"] * 0.75 if self.page.viewport_size else True:
+                loc = texts.nth(i)
+                if loc.is_visible(timeout=400):
                     loc.click(timeout=5000)
                     clicked = True
                     break
@@ -247,36 +405,13 @@ class DouDianSimilarPublisher:
                 continue
 
         if not clicked:
-            # 退化方案：点最后一个可见的“发布相似品”
-            for i in range(count - 1, -1, -1):
-                try:
-                    loc = texts.nth(i)
-                    if loc.is_visible(timeout=400):
-                        loc.click(timeout=5000)
-                        clicked = True
-                        break
-                except Exception:
-                    continue
-
-        if not clicked:
             raise PublishError("已出现操作确认弹窗，但未能选中“发布相似品”。")
 
         self.wait_page_ready(250)
 
-        # 点击弹窗底部“确定”
-        confirm_candidates = [
-            ("button", "确定"),
-            ("text", "确定"),
-            ("button", "确认"),
-            ("text", "确认"),
-        ]
-        for kind, label in confirm_candidates:
+        for label in ("确定", "确认"):
             try:
-                if kind == "button":
-                    group = self.page.get_by_role("button", name=label, exact=True)
-                else:
-                    group = self.page.get_by_text(label, exact=True)
-
+                group = self.page.get_by_role("button", name=label, exact=True)
                 cnt = min(group.count(), 12)
                 for i in range(cnt - 1, -1, -1):
                     btn = group.nth(i)
@@ -327,23 +462,25 @@ class DouDianSimilarPublisher:
                 self.click("similar_publish_entry", timeout=5000)
 
         self.wait_page_ready(500)
-
-        # V2.0.4 新增：处理弹窗二次确认。
         self._handle_similar_confirm_dialog()
-
         self.wait_page_ready(900)
         self._sync_active_page()
 
     def wait_edit_page(self):
         self._sync_active_page()
         self.step("等待相似品编辑页", 36)
-        self.locator("title_input", timeout=12000)
+        self._title_input()
         self.wait_page_ready(500)
 
     def replace_title(self, new_title: str):
         self.step("修改商品标题", 46)
-        loc = self.locator("title_input", timeout=3500)
+        loc = self._title_input()
+        try:
+            loc.scroll_into_view_if_needed(timeout=2000)
+        except Exception:
+            pass
         loc.fill(new_title, timeout=10000)
+        self.wait_page_ready(300)
 
     def replace_first_main_image(self, image_path: str):
         self.step("替换第一张主图", 60)
@@ -354,6 +491,7 @@ class DouDianSimilarPublisher:
         if image.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
             raise PublishError(f"不支持的首图格式：{image.suffix}")
 
+        # 暂保留现有上传方案；若此节点失败，新诊断信息会继续用于精确校准。
         cfg = self._cfg("first_main_image_input")
         css = cfg.get("css")
         if css:
@@ -373,26 +511,56 @@ class DouDianSimilarPublisher:
             self.wait_page_ready(900)
         except Exception as exc:
             raise PublishError(
-                "首图替换控件未定位成功，请校准 first_main_image_input / first_main_image_replace"
+                "首图替换控件未定位成功。"
+                + self.diagnostic_summary()
             ) from exc
 
     def replace_sku_name(self, sku_name: str):
         self.step("修改 SKU 名称", 74)
-        loc = self.locator("sku_name_input", timeout=5000)
-        loc.fill("")
-        loc.fill(sku_name)
+        loc = self._sku_value_input()
+        try:
+            loc.scroll_into_view_if_needed(timeout=2000)
+        except Exception:
+            pass
+        try:
+            loc.fill("")
+            loc.fill(sku_name)
+        except Exception:
+            # 部分动态表单可能使用 contenteditable
+            try:
+                loc.click()
+                self.page.keyboard.press("Control+A")
+                self.page.keyboard.type(sku_name)
+            except Exception as exc:
+                raise PublishError(
+                    "已找到包装规格控件，但无法修改其值。"
+                    + self.diagnostic_summary()
+                ) from exc
         self.wait_page_ready(350)
+
+    def _read_editable_value(self, loc):
+        try:
+            return loc.input_value().strip()
+        except Exception:
+            try:
+                return (loc.inner_text() or "").strip()
+            except Exception:
+                return ""
 
     def preflight_guard(self, expected_title: str, expected_sku: str):
         self.step("发布前校验", 84)
 
-        title = self.locator("title_input", timeout=3000).input_value().strip()
+        title = self._read_editable_value(self._title_input())
         if title != expected_title.strip():
-            raise PublishError("发布前校验失败：商品标题与任务数据不一致")
+            raise PublishError(
+                f"发布前校验失败：商品标题不一致。页面值={title!r}"
+            )
 
-        sku = self.locator("sku_name_input", timeout=3000).input_value().strip()
+        sku = self._read_editable_value(self._sku_value_input())
         if sku != expected_sku.strip():
-            raise PublishError("发布前校验失败：SKU 名称与任务数据不一致")
+            raise PublishError(
+                f"发布前校验失败：SKU 名称不一致。页面值={sku!r}"
+            )
 
     def submit(self, safe_mode: bool):
         if safe_mode:
@@ -417,7 +585,7 @@ class DouDianSimilarPublisher:
             except Exception:
                 continue
 
-        raise PublishError("已点击发布，但未检测到“商品提交成功”等成功反馈，请人工检查页面。")
+        raise PublishError("已点击发布，但未检测到成功反馈，请人工检查页面。")
 
     def run(self, task: dict, template: dict, safe_mode=True):
         code = str(task.get("task_code", "task"))
@@ -434,7 +602,9 @@ class DouDianSimilarPublisher:
 
         except PlaywrightTimeoutError as exc:
             shot = self.screenshot_error(code)
-            raise PublishError(f"页面等待超时，已截图：{shot}") from exc
+            raise PublishError(
+                f"页面等待超时，已截图：{shot}; {self.diagnostic_summary()}"
+            ) from exc
         except Exception:
             try:
                 self.screenshot_error(code)
