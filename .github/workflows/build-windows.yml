@@ -1,0 +1,46 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        working-directory: DouRPA-Windows-Build
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build EXE
+        working-directory: DouRPA-Windows-Build
+        run: |
+          pyinstaller DouRPA.spec
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build installer
+        working-directory: DouRPA-Windows-Build
+        run: |
+          iscc installer\DouRPA.iss
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: DouRPA-Windows-Installer
+          path: DouRPA-Windows-Build\installer\output\DouRPA_Setup.exe
