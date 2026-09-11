@@ -26,10 +26,16 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Validate application source
+        working-directory: DouRPA-Windows-Build
+        run: |
+          python -m compileall -q main.py app
+          python -c "from app.rpa.publisher import DouDianSimilarPublisher; from app.main_window import MainWindow; print('DouRPA import validation OK')"
+
       - name: Build EXE
         working-directory: DouRPA-Windows-Build
         run: |
-          pyinstaller DouRPA.spec
+          pyinstaller --clean DouRPA.spec
 
       - name: Install Inno Setup
         run: choco install innosetup -y
