@@ -7,6 +7,8 @@ block_cipher = None
 
 app_hiddenimports = [
     'app.main_window',
+    'app.main_window_v209',
+    'app.main_window_v210',
     'app.db',
     'app.excel_service',
     'app.rpa.browser',
@@ -20,6 +22,8 @@ a = Analysis(
     datas=playwright_datas + [
         ('config/selectors.json', 'config'),
         ('samples/相似品批量任务模板.xlsx', 'samples'),
+        ('assets/DouRPA.ico', 'assets'),
+        ('assets/DouRPA.png', 'assets'),
     ],
     hiddenimports=playwright_hiddenimports + app_hiddenimports,
     hookspath=[],
