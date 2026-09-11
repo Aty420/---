@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app.main_window import MainWindow
+from app.main_window_v209 import MainWindow
 from app.theme import APP_STYLESHEET
 
 
