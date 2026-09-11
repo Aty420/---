@@ -147,6 +147,14 @@ class Database:
         with self.connect() as conn:
             conn.execute("UPDATE tasks SET status='待执行',progress=0,current_step='等待',last_error='' WHERE status='失败'")
 
+    def delete_task(self, task_id: int):
+        with self.connect() as conn:
+            conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+
+    def purge_completed_tasks(self):
+        with self.connect() as conn:
+            conn.execute("DELETE FROM tasks WHERE status='成功'")
+
     # ---------- Stores ----------
     def add_store(self, name: str, profile_dir: str):
         with self.connect() as conn:
