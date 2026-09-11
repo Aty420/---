@@ -129,10 +129,12 @@ class DouDianSimilarPublisher:
             frames = []
         for idx, f in enumerate(frames):
             try:
+                input_count = f.locator("input").count()
+                textarea_count = f.locator("textarea").count()
+                editable_count = f.locator("[contenteditable='true']").count()
                 info.append(
-                    f"frame{idx}[url={f.url};input={f.locator('input').count()};"
-                    f"textarea={f.locator('textarea').count()};"
-                    f"contenteditable={f.locator(\"[contenteditable='true']\").count()}]"
+                    f"frame{idx}[url={f.url};input={input_count};"
+                    f"textarea={textarea_count};contenteditable={editable_count}]"
                 )
             except Exception:
                 info.append(f"frame{idx}[unreadable]")
