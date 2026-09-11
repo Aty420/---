@@ -13,7 +13,7 @@ class PublishError(RuntimeError):
 
 
 class DouDianSimilarPublisher:
-    """抖店发布相似品 RPA - V2.0.8
+    """抖店发布相似品 RPA - V2.0.9
     核心修复：自动遍历主页面及所有 iframe。
     """
 
@@ -26,6 +26,11 @@ class DouDianSimilarPublisher:
         self.selectors = json.loads(selector_file.read_text(encoding="utf-8"))
         self.step_cb = step_cb or (lambda _s, _p: None)
         self._sku_verified = False
+        self._product_list_page = None
+        self._product_list_url = ""
+        self.ready_for_next = True
+        self.cleanup_error = ""
+        self.publish_clicked = False
 
     def step(self, text: str, progress: int):
         self.step_cb(text, progress)
@@ -730,12 +735,87 @@ class DouDianSimilarPublisher:
         if not self._sku_verified:
             raise PublishError("发布前校验失败：包装规格名称未通过精确校验。")
 
+    def _return_to_product_list_after_success(self):
+        """发布成功后关闭成功/编辑标签页，并回到原商品管理标签页。
+
+        注意：商品已经发布成功后，这一步即使失败也不能把当前任务改成失败，
+        否则用户重试会造成重复发布。因此这里只记录 ready_for_next=False，
+        由 BrowserWorker 重连/暂停后续批量任务。
+        """
+        self.step("关闭发布成功页并返回商品管理", 98)
+        self.ready_for_next = False
+        self.cleanup_error = ""
+
+        try:
+            success_page = self.page
+            product_page = self._product_list_page
+
+            # 最常见场景：发布相似品在新标签页完成，商品管理原标签仍然存在。
+            if product_page is not None and not product_page.is_closed():
+                if success_page is not product_page and not success_page.is_closed():
+                    success_page.close()
+                    self.page.wait_for_timeout(250) if not self.page.is_closed() else None
+
+                product_page.bring_to_front()
+                self.page = product_page
+                self.page.wait_for_timeout(500)
+
+                if self._has_source_search(5000):
+                    self.ready_for_next = True
+                    self.step("已回到商品列表，可继续下一条", 100)
+                    return True
+
+                # 原标签仍在，但页面结构被平台刷新时，用记录下来的商品列表 URL 恢复。
+                if self._product_list_url:
+                    product_page.goto(
+                        self._product_list_url,
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+                    product_page.wait_for_timeout(900)
+                    if self._has_source_search(6000):
+                        self.ready_for_next = True
+                        self.step("已回到商品列表，可继续下一条", 100)
+                        return True
+
+            # 少数账号可能在同一标签完成发布；直接回到发布前记录的商品列表 URL。
+            pages = [p for p in success_page.context.pages if not p.is_closed()]
+            target = product_page if product_page in pages else (pages[-1] if pages else None)
+            if target is None:
+                raise PublishError("发布成功后浏览器中没有可用标签页。")
+
+            self.page = target
+            if self._product_list_url:
+                self.page.goto(
+                    self._product_list_url,
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                self.page.wait_for_timeout(900)
+
+            if not self._has_source_search(6000):
+                self.open_product_list()
+
+            if self._has_source_search(4000):
+                self.ready_for_next = True
+                self.step("已回到商品列表，可继续下一条", 100)
+                return True
+
+            raise PublishError("发布成功，但未能恢复到商品管理/商品列表。")
+        except Exception as exc:
+            self.cleanup_error = str(exc)
+            self.ready_for_next = False
+            # 当前商品已经确认发布成功，绝不在这里抛异常导致任务被重跑。
+            self.step("发布成功，但商品管理页恢复失败", 100)
+            return False
+
     def submit(self, safe_mode: bool):
         if safe_mode:
             self.step("已到发布前安全停点", 92)
             return "待确认", "已完成标题、首图、包装规格名称修改，已停在最终发布前。"
 
         self.step("提交发布", 92)
+        self.publish_clicked = True
         self.click("publish_button", timeout=12000)
         self.wait_page_ready(800)
         self._sync_active_page()
@@ -749,7 +829,7 @@ class DouDianSimilarPublisher:
                     scope.get_by_text(text, exact=False).first.wait_for(
                         state="visible", timeout=5000
                     )
-                    self.step("发布成功", 100)
+                    self.step("检测到发布成功", 96)
                     return "成功", text
                 except Exception:
                     continue
@@ -760,13 +840,30 @@ class DouDianSimilarPublisher:
         try:
             self._sync_active_page()
             self.open_product_list()
+
+            # 记住“商品管理/商品列表”原标签。发布相似品通常会打开新标签页，
+            # 发布成功后必须关闭新标签并回到这里，才能稳定执行批量下一条。
+            self._product_list_page = self.page
+            self._product_list_url = self.page.url
+            self.ready_for_next = True
+            self.cleanup_error = ""
+            self.publish_clicked = False
+
             self.open_similar_product(str(template["source_keyword"]))
             self.wait_edit_page()
             self.replace_title(str(task["new_title"]))
             self.replace_first_main_image(str(task["cover_image"]))
             self.replace_sku_name(str(task["sku_name"]))
             self.preflight_guard(str(task["new_title"]), str(task["sku_name"]))
-            return self.submit(safe_mode)
+            status, result = self.submit(safe_mode)
+
+            if status == "成功" and not safe_mode:
+                restored = self._return_to_product_list_after_success()
+                if restored:
+                    result = f"{result}；已关闭发布页并返回商品管理"
+                else:
+                    result = f"{result}；商品已发布，但返回商品管理失败：{self.cleanup_error}"
+            return status, result
         except PlaywrightTimeoutError as exc:
             shot = self.screenshot_error(code)
             raise PublishError(
