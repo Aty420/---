@@ -168,9 +168,19 @@ class Database:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM stores WHERE id=?", (store_id,)).fetchone()
 
-    def update_store_status(self, store_id: int, status: str):
+    def update_store_status(self, store_id: int, status: str, touch_login: bool = True):
         with self.connect() as conn:
-            conn.execute("UPDATE stores SET status=?,last_login=CURRENT_TIMESTAMP WHERE id=?", (status, store_id))
+            if touch_login:
+                conn.execute("UPDATE stores SET status=?,last_login=CURRENT_TIMESTAMP WHERE id=?", (status, store_id))
+            else:
+                conn.execute("UPDATE stores SET status=? WHERE id=?", (status, store_id))
+
+    def mark_runtime_stores_closed(self):
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE stores SET status='浏览器已关闭' "
+                "WHERE status IN ('浏览器已打开','已连接','连接已断开','浏览器连接已断开')"
+            )
 
     def delete_store(self, store_id: int):
         """Delete only the DouRPA store record.
