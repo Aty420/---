@@ -8,7 +8,7 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app.main_window_v212 import MainWindow
+from app.main_window_v213 import MainWindow
 from app.theme import APP_STYLESHEET
 
 
