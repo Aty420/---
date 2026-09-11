@@ -12,7 +12,9 @@ class PublishError(RuntimeError):
 
 
 class DouDianSimilarPublisher:
-    """抖店发布相似品 RPA - V2.0.5"""
+    """抖店发布相似品 RPA - V2.0.6
+    核心修复：自动遍历主页面及所有 iframe。
+    """
 
     def __init__(self, page: Page, selector_file: Path, screenshot_dir: Path,
                  step_cb: Callable[[str, int], None] | None = None):
@@ -36,7 +38,6 @@ class DouDianSimilarPublisher:
             pages = []
         if not pages:
             raise PublishError("浏览器中没有可用页面。")
-
         preferred = [
             p for p in pages
             if ("jinritemai.com" in (p.url or "") or "douyin.com" in (p.url or ""))
@@ -48,20 +49,32 @@ class DouDianSimilarPublisher:
             pass
         return self.page
 
-    def _candidate_locator(self, candidate: dict):
+    def _scopes(self):
+        """返回当前页面所有 Frame（包含主 frame），优先子 frame。"""
+        self._sync_active_page()
+        try:
+            frames = list(self.page.frames)
+        except Exception:
+            frames = []
+        # 编辑器常在子 frame 中，优先查子 frame，再查 main frame
+        children = [f for f in frames if f != self.page.main_frame]
+        ordered = children + ([self.page.main_frame] if self.page.main_frame else [])
+        return ordered or [self.page]
+
+    def _candidate_locator(self, scope, candidate: dict):
         kind = candidate.get("kind", "text")
         value = candidate.get("value", "")
         exact = bool(candidate.get("exact", False))
         if kind == "text":
-            return self.page.get_by_text(value, exact=exact)
+            return scope.get_by_text(value, exact=exact)
         if kind == "placeholder":
-            return self.page.get_by_placeholder(value, exact=exact)
+            return scope.get_by_placeholder(value, exact=exact)
         if kind == "label":
-            return self.page.get_by_label(value, exact=exact)
+            return scope.get_by_label(value, exact=exact)
         if kind == "role":
-            return self.page.get_by_role(candidate.get("role", "button"), name=value, exact=exact)
+            return scope.get_by_role(candidate.get("role", "button"), name=value, exact=exact)
         if kind == "css":
-            return self.page.locator(value)
+            return scope.locator(value)
         raise PublishError(f"不支持的 selector 类型: {kind}")
 
     def locator(self, key: str, timeout=1500):
@@ -71,20 +84,20 @@ class DouDianSimilarPublisher:
             if cfg.get(k):
                 candidates.append({"kind": k, "value": cfg[k]})
 
-        for cand in candidates:
-            try:
-                group = self._candidate_locator(cand)
-                count = min(group.count(), 20)
-            except Exception:
-                continue
-
-            for i in range(count):
+        for scope in self._scopes():
+            for cand in candidates:
                 try:
-                    loc = group.nth(i)
-                    if loc.is_visible(timeout=timeout):
-                        return loc
+                    group = self._candidate_locator(scope, cand)
+                    count = min(group.count(), 30)
                 except Exception:
                     continue
+                for i in range(count):
+                    try:
+                        loc = group.nth(i)
+                        if loc.is_visible(timeout=timeout):
+                            return loc
+                    except Exception:
+                        continue
 
         raise PublishError(f"未找到页面元素：{key}。请在 config/selectors.json 校准该节点。")
 
@@ -108,156 +121,154 @@ class DouDianSimilarPublisher:
         return path
 
     def diagnostic_summary(self) -> str:
+        info = []
+        self._sync_active_page()
         try:
-            inputs = self.page.locator("input")
-            textareas = self.page.locator("textarea")
-            contents = self.page.locator("[contenteditable='true']")
-            return (
-                f"URL={self.page.url}; "
-                f"input={inputs.count()}; textarea={textareas.count()}; "
-                f"contenteditable={contents.count()}"
-            )
+            frames = self.page.frames
         except Exception:
-            return f"URL={getattr(self.page, 'url', '')}"
+            frames = []
+        for idx, f in enumerate(frames):
+            try:
+                info.append(
+                    f"frame{idx}[url={f.url};input={f.locator('input').count()};"
+                    f"textarea={f.locator('textarea').count()};"
+                    f"contenteditable={f.locator(\"[contenteditable='true']\").count()}]"
+                )
+            except Exception:
+                info.append(f"frame{idx}[unreadable]")
+        return f"page={self.page.url}; frames={len(frames)}; " + " | ".join(info)
 
     def _visible_controls_in_ancestor(self, text: str, exact=True):
-        """从字段标签向上找表单容器，再找其中的可编辑控件。"""
-        labels = self.page.get_by_text(text, exact=exact)
-        try:
-            count = min(labels.count(), 15)
-        except Exception:
-            count = 0
-
         results = []
-        for i in range(count):
-            label = labels.nth(i)
+        for scope in self._scopes():
             try:
-                if not label.is_visible(timeout=400):
-                    continue
+                labels = scope.get_by_text(text, exact=exact)
+                count = min(labels.count(), 20)
             except Exception:
                 continue
 
-            # 从标签父级开始最多向上 5 层，适配抖店动态表单结构
-            for depth in range(1, 6):
-                xpath = "/.." * depth
+            for i in range(count):
+                label = labels.nth(i)
                 try:
-                    ancestor = label.locator("xpath=" + xpath)
-                    controls = ancestor.locator(
-                        "input:not([type='hidden']):not([disabled]), "
-                        "textarea:not([disabled]), "
-                        "[contenteditable='true']"
-                    )
-                    c = min(controls.count(), 20)
+                    if not label.is_visible(timeout=350):
+                        continue
                 except Exception:
                     continue
 
-                for j in range(c):
-                    ctl = controls.nth(j)
+                for depth in range(1, 7):
                     try:
-                        if not ctl.is_visible(timeout=300):
-                            continue
-                        box = ctl.bounding_box()
-                        if not box or box["width"] < 80 or box["height"] < 18:
-                            continue
-                        key = (
-                            round(box["x"]), round(box["y"]),
-                            round(box["width"]), round(box["height"])
+                        ancestor = label.locator("xpath=" + "/.." * depth)
+                        controls = ancestor.locator(
+                            "input:not([type='hidden']):not([disabled]), "
+                            "textarea:not([disabled]), "
+                            "[contenteditable='true']"
                         )
-                        if all(r[0] != key for r in results):
-                            results.append((key, ctl, depth))
+                        c = min(controls.count(), 30)
                     except Exception:
                         continue
 
-                if results:
-                    return results
+                    local = []
+                    for j in range(c):
+                        ctl = controls.nth(j)
+                        try:
+                            if not ctl.is_visible(timeout=250):
+                                continue
+                            box = ctl.bounding_box()
+                            if not box or box["width"] < 70 or box["height"] < 16:
+                                continue
+                            local.append((box, ctl, depth))
+                        except Exception:
+                            continue
+                    if local:
+                        results.extend(local)
+                        break
         return results
 
     def _title_input(self):
-        self._sync_active_page()
-
-        # 1) 先尝试旧配置，保持兼容
+        # 1) 旧 selector 兼容
         try:
             return self.locator("title_input", timeout=900)
         except Exception:
             pass
 
-        # 2) 根据截图中的字段名“商品标题”做相对定位
+        # 2) 字段标签相对定位（遍历 iframe）
         controls = self._visible_controls_in_ancestor("商品标题", exact=True)
         if controls:
-            # 商品标题框是该行最宽的可编辑控件，优先选宽度最大的
-            controls.sort(key=lambda x: x[0][2], reverse=True)
-            return controls[0][1]
-
-        # 3) 兜底：找页面顶部基础信息区域的长文本框
-        candidates = self.page.locator(
-            "input:not([type='hidden']):not([disabled]), textarea:not([disabled])"
-        )
-        found = []
-        try:
-            count = min(candidates.count(), 80)
-        except Exception:
-            count = 0
-
-        for i in range(count):
-            loc = candidates.nth(i)
-            try:
-                if not loc.is_visible(timeout=250):
-                    continue
-                box = loc.bounding_box()
-                if not box or box["width"] < 350:
-                    continue
-                val = ""
+            # 标题通常是最宽、且位于页面较上方的控件
+            scored = []
+            for box, ctl, depth in controls:
                 try:
-                    val = loc.input_value().strip()
+                    val = ctl.input_value().strip()
                 except Exception:
-                    pass
-                # 标题截图中是较长已有文本，优先有内容的宽输入框
+                    val = ""
+                score = box["width"] * 2 - box["y"] - depth * 10
                 if len(val) >= 8:
-                    found.append((box["y"], -box["width"], loc))
+                    score += 500
+                scored.append((score, ctl))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return scored[0][1]
+
+        # 3) 全 frame 宽输入框兜底
+        found = []
+        for scope in self._scopes():
+            try:
+                candidates = scope.locator(
+                    "input:not([type='hidden']):not([disabled]), textarea:not([disabled])"
+                )
+                count = min(candidates.count(), 120)
             except Exception:
                 continue
-
+            for i in range(count):
+                loc = candidates.nth(i)
+                try:
+                    if not loc.is_visible(timeout=200):
+                        continue
+                    box = loc.bounding_box()
+                    if not box or box["width"] < 300:
+                        continue
+                    val = ""
+                    try:
+                        val = loc.input_value().strip()
+                    except Exception:
+                        pass
+                    score = box["width"] - box["y"]
+                    if len(val) >= 8:
+                        score += 400
+                    found.append((score, loc))
+                except Exception:
+                    continue
         if found:
-            found.sort(key=lambda x: (x[0], x[1]))
-            return found[0][2]
+            found.sort(key=lambda x: x[0], reverse=True)
+            return found[0][1]
 
-        raise PublishError(
-            "未能定位“商品标题”输入框。"
-            + self.diagnostic_summary()
-        )
+        raise PublishError("未能定位“商品标题”输入框。 " + self.diagnostic_summary())
 
     def _sku_value_input(self):
-        self._sync_active_page()
-
-        # 根据截图：商品规格 > 包装规格 > 已有规格值
         controls = self._visible_controls_in_ancestor("包装规格", exact=True)
-
         scored = []
-        for key, ctl, depth in controls:
-            try:
-                tag = ctl.evaluate("(e)=>e.tagName.toLowerCase()")
-            except Exception:
-                tag = ""
+        for box, ctl, depth in controls:
             try:
                 placeholder = ctl.get_attribute("placeholder") or ""
             except Exception:
                 placeholder = ""
             try:
-                value = ctl.input_value().strip() if tag in ("input", "textarea") else (ctl.inner_text() or "").strip()
+                value = ctl.input_value().strip()
             except Exception:
-                value = ""
+                try:
+                    value = (ctl.inner_text() or "").strip()
+                except Exception:
+                    value = ""
 
-            # 排除截图中“填写并新增规格值”的新增框
             if "新增规格" in placeholder or "新增规格值" in placeholder:
                 continue
 
             score = 0
             if value:
-                score += 100
+                score += 200
             if len(value) >= 4:
-                score += 50
-            if key[2] >= 140:
-                score += 10
+                score += 100
+            if box["width"] >= 120:
+                score += 20
             score -= depth
             scored.append((score, ctl))
 
@@ -265,16 +276,12 @@ class DouDianSimilarPublisher:
             scored.sort(key=lambda x: x[0], reverse=True)
             return scored[0][1]
 
-        # 兼容旧 placeholder 方案
         try:
             return self.locator("sku_name_input", timeout=1200)
         except Exception:
             pass
 
-        raise PublishError(
-            "未能定位“包装规格”已有规格值输入框。"
-            + self.diagnostic_summary()
-        )
+        raise PublishError("未能定位“包装规格”已有规格值。 " + self.diagnostic_summary())
 
     def _has_source_search(self, timeout=2200) -> bool:
         try:
@@ -284,23 +291,23 @@ class DouDianSimilarPublisher:
             return False
 
     def _click_visible_text(self, text: str, exact=True, timeout=5000):
-        group = self.page.get_by_text(text, exact=exact)
-        try:
-            count = min(group.count(), 20)
-        except Exception:
-            count = 0
-        last_exc = None
-        for i in range(count):
-            loc = group.nth(i)
+        for scope in self._scopes():
             try:
-                if not loc.is_visible(timeout=500):
+                group = scope.get_by_text(text, exact=exact)
+                count = min(group.count(), 30)
+            except Exception:
+                continue
+            for i in range(count):
+                loc = group.nth(i)
+                try:
+                    if not loc.is_visible(timeout=400):
+                        continue
+                    loc.scroll_into_view_if_needed(timeout=1000)
+                    loc.click(timeout=timeout)
+                    return loc
+                except Exception:
                     continue
-                loc.scroll_into_view_if_needed(timeout=1000)
-                loc.click(timeout=timeout)
-                return loc
-            except Exception as exc:
-                last_exc = exc
-        raise PublishError(f"未找到可点击文字：{text}") from last_exc
+        raise PublishError(f"未找到可点击文字：{text}")
 
     def _click_product_management_directly(self):
         try:
@@ -355,39 +362,44 @@ class DouDianSimilarPublisher:
     def search_source_product(self, keyword: str):
         self._sync_active_page()
         self.step("搜索源商品", 18)
-
         box = self.locator("source_search_input", timeout=4000)
         box.fill("")
         box.fill(keyword)
-
         try:
             self.click("source_search_button", timeout=5000)
         except PublishError:
             box.press("Enter")
-
         self.wait_page_ready(1200)
         self._sync_active_page()
 
-        row = self.page.locator("tr").filter(has_text=keyword).first
-        try:
-            row.wait_for(state="visible", timeout=3500)
-            return row
-        except Exception:
-            return None
+        # 从所有 frame 中寻找包含源商品 ID/关键词的行
+        for scope in self._scopes():
+            try:
+                row = scope.locator("tr").filter(has_text=keyword).first
+                row.wait_for(state="visible", timeout=1800)
+                return row
+            except Exception:
+                continue
+        return None
 
     def _handle_similar_confirm_dialog(self):
         self._sync_active_page()
         self.wait_page_ready(350)
 
-        try:
-            title = self.page.get_by_text("请确认要进行的操作", exact=False).first
-            title.wait_for(state="visible", timeout=1800)
-        except Exception:
+        dialog_scope = None
+        for scope in self._scopes():
+            try:
+                title = scope.get_by_text("请确认要进行的操作", exact=False).first
+                title.wait_for(state="visible", timeout=900)
+                dialog_scope = scope
+                break
+            except Exception:
+                continue
+        if dialog_scope is None:
             return
 
         self.step("确认发布相似品", 32)
-
-        texts = self.page.get_by_text("发布相似品", exact=True)
+        texts = dialog_scope.get_by_text("发布相似品", exact=True)
         clicked = False
         try:
             count = min(texts.count(), 20)
@@ -397,33 +409,31 @@ class DouDianSimilarPublisher:
         for i in range(count - 1, -1, -1):
             try:
                 loc = texts.nth(i)
-                if loc.is_visible(timeout=400):
+                if loc.is_visible(timeout=300):
                     loc.click(timeout=5000)
                     clicked = True
                     break
             except Exception:
                 continue
-
         if not clicked:
-            raise PublishError("已出现操作确认弹窗，但未能选中“发布相似品”。")
+            raise PublishError("已出现确认弹窗，但未能选中“发布相似品”。")
 
         self.wait_page_ready(250)
 
         for label in ("确定", "确认"):
             try:
-                group = self.page.get_by_role("button", name=label, exact=True)
+                group = dialog_scope.get_by_role("button", name=label, exact=True)
                 cnt = min(group.count(), 12)
                 for i in range(cnt - 1, -1, -1):
                     btn = group.nth(i)
-                    if btn.is_visible(timeout=400):
+                    if btn.is_visible(timeout=300):
                         btn.click(timeout=6000)
                         self.wait_page_ready(1000)
                         self._sync_active_page()
                         return
             except Exception:
                 continue
-
-        raise PublishError("已选中“发布相似品”，但未能点击确认弹窗中的“确定”。")
+        raise PublishError("已选中“发布相似品”，但未能点击“确定”。")
 
     def open_similar_product(self, keyword: str):
         self.step("打开发布相似品", 28)
@@ -479,40 +489,45 @@ class DouDianSimilarPublisher:
             loc.scroll_into_view_if_needed(timeout=2000)
         except Exception:
             pass
-        loc.fill(new_title, timeout=10000)
-        self.wait_page_ready(300)
+        try:
+            loc.fill(new_title, timeout=10000)
+        except Exception:
+            loc.click()
+            self.page.keyboard.press("Control+A")
+            self.page.keyboard.type(new_title)
+        self.wait_page_ready(350)
 
     def replace_first_main_image(self, image_path: str):
         self.step("替换第一张主图", 60)
         image = Path(image_path)
-
         if not image.exists() or not image.is_file():
             raise PublishError(f"新首图不存在：{image}")
         if image.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
             raise PublishError(f"不支持的首图格式：{image.suffix}")
 
-        # 暂保留现有上传方案；若此节点失败，新诊断信息会继续用于精确校准。
+        # 遍历所有 iframe 中的 file input
         cfg = self._cfg("first_main_image_input")
-        css = cfg.get("css")
-        if css:
-            inputs = self.page.locator(css)
+        css = cfg.get("css") or "input[type='file'][accept*='image']"
+        for scope in self._scopes():
             try:
+                inputs = scope.locator(css)
                 if inputs.count() > 0:
                     inputs.nth(int(cfg.get("index", 0))).set_input_files(str(image))
                     self.wait_page_ready(900)
                     return
             except Exception:
-                pass
+                continue
 
+        # 退化方案：点击替换/更换并接管 file chooser
         try:
             with self.page.expect_file_chooser(timeout=7000) as chooser_info:
                 self.click("first_main_image_replace", timeout=6500)
             chooser_info.value.set_files(str(image))
             self.wait_page_ready(900)
+            return
         except Exception as exc:
             raise PublishError(
-                "首图替换控件未定位成功。"
-                + self.diagnostic_summary()
+                "首图替换控件未定位成功。 " + self.diagnostic_summary()
             ) from exc
 
     def replace_sku_name(self, sku_name: str):
@@ -526,15 +541,13 @@ class DouDianSimilarPublisher:
             loc.fill("")
             loc.fill(sku_name)
         except Exception:
-            # 部分动态表单可能使用 contenteditable
             try:
                 loc.click()
                 self.page.keyboard.press("Control+A")
                 self.page.keyboard.type(sku_name)
             except Exception as exc:
                 raise PublishError(
-                    "已找到包装规格控件，但无法修改其值。"
-                    + self.diagnostic_summary()
+                    "已找到包装规格控件，但无法修改。 " + self.diagnostic_summary()
                 ) from exc
         self.wait_page_ready(350)
 
@@ -549,18 +562,13 @@ class DouDianSimilarPublisher:
 
     def preflight_guard(self, expected_title: str, expected_sku: str):
         self.step("发布前校验", 84)
-
         title = self._read_editable_value(self._title_input())
         if title != expected_title.strip():
-            raise PublishError(
-                f"发布前校验失败：商品标题不一致。页面值={title!r}"
-            )
+            raise PublishError(f"发布前校验失败：商品标题不一致。页面值={title!r}")
 
         sku = self._read_editable_value(self._sku_value_input())
         if sku != expected_sku.strip():
-            raise PublishError(
-                f"发布前校验失败：SKU 名称不一致。页面值={sku!r}"
-            )
+            raise PublishError(f"发布前校验失败：SKU 名称不一致。页面值={sku!r}")
 
     def submit(self, safe_mode: bool):
         if safe_mode:
@@ -575,16 +583,16 @@ class DouDianSimilarPublisher:
         success_texts = self._cfg("publish_success_texts").get(
             "values", ["商品提交成功", "提交成功", "发布成功"]
         )
-        for text in success_texts:
-            try:
-                self.page.get_by_text(text, exact=False).first.wait_for(
-                    state="visible", timeout=15000
-                )
-                self.step("发布成功", 100)
-                return "成功", text
-            except Exception:
-                continue
-
+        for scope in self._scopes():
+            for text in success_texts:
+                try:
+                    scope.get_by_text(text, exact=False).first.wait_for(
+                        state="visible", timeout=5000
+                    )
+                    self.step("发布成功", 100)
+                    return "成功", text
+                except Exception:
+                    continue
         raise PublishError("已点击发布，但未检测到成功反馈，请人工检查页面。")
 
     def run(self, task: dict, template: dict, safe_mode=True):
@@ -599,7 +607,6 @@ class DouDianSimilarPublisher:
             self.replace_sku_name(str(task["sku_name"]))
             self.preflight_guard(str(task["new_title"]), str(task["sku_name"]))
             return self.submit(safe_mode)
-
         except PlaywrightTimeoutError as exc:
             shot = self.screenshot_error(code)
             raise PublishError(
