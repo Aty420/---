@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -12,7 +13,7 @@ class PublishError(RuntimeError):
 
 
 class DouDianSimilarPublisher:
-    """抖店发布相似品 RPA - V2.0.6
+    """抖店发布相似品 RPA - V2.0.7
     核心修复：自动遍历主页面及所有 iframe。
     """
 
@@ -478,26 +479,113 @@ class DouDianSimilarPublisher:
         self.wait_page_ready(900)
         self._sync_active_page()
 
+    def _visible_text_locator(self, text: str, exact=True, timeout_ms=30000):
+        """等待页面中的可见文字出现，并优先返回编辑区左侧的匹配项。"""
+        deadline = time.monotonic() + timeout_ms / 1000
+        last = None
+        while time.monotonic() < deadline:
+            candidates = []
+            for scope in self._scopes():
+                try:
+                    group = scope.get_by_text(text, exact=exact)
+                    count = min(group.count(), 30)
+                except Exception as exc:
+                    last = exc
+                    continue
+                for i in range(count):
+                    loc = group.nth(i)
+                    try:
+                        if not loc.is_visible(timeout=250):
+                            continue
+                        box = loc.bounding_box()
+                        if not box:
+                            continue
+                        # 编辑区通常位于页面左/中部；排除右侧消费者预览中的同名文字。
+                        vw = (self.page.viewport_size or {}).get("width", 99999)
+                        penalty = 5000 if box["x"] > vw * 0.80 else 0
+                        candidates.append((penalty + box["x"] + box["y"] * 0.05, loc, box))
+                    except Exception as exc:
+                        last = exc
+                        continue
+            if candidates:
+                candidates.sort(key=lambda x: x[0])
+                return candidates[0][1]
+            self.page.wait_for_timeout(500)
+        raise PublishError(f"等待页面文字超时：{text}。{self.diagnostic_summary()}") from last
+
+    def _keyboard_edit_near_label(self, label_text: str, value: str, x_offset=240, y_offset=0):
+        """用于抖店自定义富文本/组件：基于字段标签位置点击，再用真实键盘输入。"""
+        label = self._visible_text_locator(label_text, exact=True, timeout_ms=10000)
+        try:
+            label.scroll_into_view_if_needed(timeout=2500)
+        except Exception:
+            pass
+        self.page.wait_for_timeout(250)
+        box = label.bounding_box()
+        if not box:
+            raise PublishError(f"无法获取字段位置：{label_text}")
+        x = box["x"] + box["width"] + x_offset
+        y = box["y"] + box["height"] / 2 + y_offset
+        self.page.mouse.click(x, y)
+        self.page.wait_for_timeout(150)
+        self.page.keyboard.press("Control+A")
+        self.page.wait_for_timeout(80)
+        self.page.keyboard.insert_text(value)
+        self.page.wait_for_timeout(500)
+
+    def _visible_text_exists(self, text: str, timeout_ms=2500) -> bool:
+        try:
+            self._visible_text_locator(text, exact=False, timeout_ms=timeout_ms)
+            return True
+        except Exception:
+            return False
+
     def wait_edit_page(self):
         self._sync_active_page()
-        self.step("等待相似品编辑页", 36)
-        self._title_input()
-        self.wait_page_ready(500)
+        self.step("等待相似品编辑页加载", 36)
+
+        # 抖店发布页是 SPA，URL 已切换并不代表表单完成 hydration。
+        # 旧版本只等约 1 秒，用户机器上经常出现页面肉眼稍后才加载完成的情况。
+        self._visible_text_locator("商品标题", exact=True, timeout_ms=30000)
+        self._visible_text_locator("基础信息", exact=True, timeout_ms=10000)
+        self.page.wait_for_timeout(1200)
+        self.step("编辑页加载完成", 40)
 
     def replace_title(self, new_title: str):
         self.step("修改商品标题", 46)
-        loc = self._title_input()
+
+        # 优先标准 DOM；若抖店把标题渲染成自定义富文本组件，则退化为标签定位+键盘输入。
         try:
-            loc.scroll_into_view_if_needed(timeout=2000)
+            loc = self._title_input()
+            try:
+                loc.scroll_into_view_if_needed(timeout=2000)
+            except Exception:
+                pass
+            try:
+                loc.fill(new_title, timeout=8000)
+            except Exception:
+                loc.click()
+                self.page.keyboard.press("Control+A")
+                self.page.keyboard.insert_text(new_title)
         except Exception:
-            pass
-        try:
-            loc.fill(new_title, timeout=10000)
-        except Exception:
-            loc.click()
-            self.page.keyboard.press("Control+A")
-            self.page.keyboard.type(new_title)
-        self.wait_page_ready(350)
+            self._keyboard_edit_near_label("商品标题", new_title, x_offset=260, y_offset=0)
+
+        # 自定义组件无法可靠读取 input_value，因此同时用页面可见文本做校验。
+        if not self._visible_text_exists(new_title, timeout_ms=3500):
+            try:
+                loc = self._title_input()
+                value = self._read_editable_value(loc)
+                if value.strip() != new_title.strip():
+                    raise PublishError(
+                        f"标题输入后未检测到新标题。页面值={value!r}; {self.diagnostic_summary()}"
+                    )
+            except PublishError:
+                raise
+            except Exception:
+                raise PublishError(
+                    "标题输入动作已执行，但无法确认页面已更新。" + self.diagnostic_summary()
+                )
+        self.wait_page_ready(500)
 
     def replace_first_main_image(self, image_path: str):
         self.step("替换第一张主图", 60)
@@ -533,25 +621,49 @@ class DouDianSimilarPublisher:
             ) from exc
 
     def replace_sku_name(self, sku_name: str):
-        self.step("修改 SKU 名称", 74)
-        loc = self._sku_value_input()
+        self.step("进入价格库存", 70)
         try:
-            loc.scroll_into_view_if_needed(timeout=2000)
+            self._click_visible_text("价格库存", exact=True, timeout=6000)
         except Exception:
+            # 某些页面可通过滚动直接看到规格区，点不到 tab 时继续尝试。
             pass
+        self.page.wait_for_timeout(900)
+
+        self.step("修改 SKU 名称", 74)
+        self._visible_text_locator("包装规格", exact=True, timeout_ms=15000)
+
         try:
-            loc.fill("")
-            loc.fill(sku_name)
-        except Exception:
+            loc = self._sku_value_input()
             try:
+                loc.scroll_into_view_if_needed(timeout=2000)
+            except Exception:
+                pass
+            try:
+                loc.fill("")
+                loc.fill(sku_name)
+            except Exception:
                 loc.click()
                 self.page.keyboard.press("Control+A")
-                self.page.keyboard.type(sku_name)
-            except Exception as exc:
+                self.page.keyboard.insert_text(sku_name)
+        except Exception:
+            # 根据实际录屏，“包装规格”的已有值位于标签下一行右侧。
+            self._keyboard_edit_near_label("包装规格", sku_name, x_offset=120, y_offset=42)
+
+        if not self._visible_text_exists(sku_name, timeout_ms=3000):
+            try:
+                loc = self._sku_value_input()
+                value = self._read_editable_value(loc)
+                if value.strip() != sku_name.strip():
+                    raise PublishError(
+                        f"SKU 输入后未检测到新规格名。页面值={value!r}; {self.diagnostic_summary()}"
+                    )
+            except PublishError:
+                raise
+            except Exception:
                 raise PublishError(
-                    "已找到包装规格控件，但无法修改。 " + self.diagnostic_summary()
-                ) from exc
-        self.wait_page_ready(350)
+                    "SKU 输入动作已执行，但无法确认页面已更新。" + self.diagnostic_summary()
+                )
+        self.wait_page_ready(500)
 
     def _read_editable_value(self, loc):
         try:
@@ -564,13 +676,24 @@ class DouDianSimilarPublisher:
 
     def preflight_guard(self, expected_title: str, expected_sku: str):
         self.step("发布前校验", 84)
-        title = self._read_editable_value(self._title_input())
-        if title != expected_title.strip():
-            raise PublishError(f"发布前校验失败：商品标题不一致。页面值={title!r}")
 
-        sku = self._read_editable_value(self._sku_value_input())
-        if sku != expected_sku.strip():
-            raise PublishError(f"发布前校验失败：SKU 名称不一致。页面值={sku!r}")
+        title_ok = self._visible_text_exists(expected_title, timeout_ms=1800)
+        if not title_ok:
+            try:
+                title_ok = self._read_editable_value(self._title_input()) == expected_title.strip()
+            except Exception:
+                title_ok = False
+        if not title_ok:
+            raise PublishError("发布前校验失败：未确认新标题已写入。")
+
+        sku_ok = self._visible_text_exists(expected_sku, timeout_ms=1800)
+        if not sku_ok:
+            try:
+                sku_ok = self._read_editable_value(self._sku_value_input()) == expected_sku.strip()
+            except Exception:
+                sku_ok = False
+        if not sku_ok:
+            raise PublishError("发布前校验失败：未确认新 SKU 名称已写入。")
 
     def submit(self, safe_mode: bool):
         if safe_mode:
