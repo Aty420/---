@@ -74,7 +74,6 @@ class Database:
                 """
             )
 
-            # Compatibility with the V1 database if the user upgrades in place.
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS products (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -164,6 +163,16 @@ class Database:
     def update_store_status(self, store_id: int, status: str):
         with self.connect() as conn:
             conn.execute("UPDATE stores SET status=?,last_login=CURRENT_TIMESTAMP WHERE id=?", (status, store_id))
+
+    def delete_store(self, store_id: int):
+        """Delete only the DouRPA store record.
+
+        Source templates are safely unbound first. Browser profile files are deliberately
+        kept on disk so deleting a row cannot unexpectedly destroy login/session data.
+        """
+        with self.connect() as conn:
+            conn.execute("UPDATE source_templates SET store_id=NULL WHERE store_id=?", (store_id,))
+            conn.execute("DELETE FROM stores WHERE id=?", (store_id,))
 
     # ---------- Source templates ----------
     def save_template(self, name: str, store_id: int | None, search_mode: str, source_keyword: str, note: str = ""):
