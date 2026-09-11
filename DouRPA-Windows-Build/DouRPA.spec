@@ -5,15 +5,23 @@ playwright_datas, playwright_binaries, playwright_hiddenimports = collect_all('p
 
 block_cipher = None
 
+app_hiddenimports = [
+    'app.main_window',
+    'app.db',
+    'app.excel_service',
+    'app.rpa.browser',
+    'app.rpa.publisher',
+]
+
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=['.'],
     binaries=playwright_binaries,
     datas=playwright_datas + [
         ('config/selectors.json', 'config'),
         ('samples/相似品批量任务模板.xlsx', 'samples'),
     ],
-    hiddenimports=playwright_hiddenimports,
+    hiddenimports=playwright_hiddenimports + app_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
