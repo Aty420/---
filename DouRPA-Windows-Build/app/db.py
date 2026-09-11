@@ -155,6 +155,23 @@ class Database:
         with self.connect() as conn:
             conn.execute("DELETE FROM tasks WHERE status='成功'")
 
+    def end_runtime_tasks(self):
+        """Normalize tasks when the user explicitly ends the current browser run.
+
+        Queued work is safe to return to pending. A task already executing is marked failed
+        instead of automatically re-queued because it may have reached the publish click.
+        """
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET status='待执行',progress=0,current_step='等待',last_error='',updated_at=CURRENT_TIMESTAMP "
+                "WHERE status='排队中'"
+            )
+            conn.execute(
+                "UPDATE tasks SET status='失败',progress=0,current_step='用户结束运行',"
+                "last_error='用户主动结束运行，请确认该商品是否已发布后再决定是否重试',updated_at=CURRENT_TIMESTAMP "
+                "WHERE status='执行中'"
+            )
+
     # ---------- Stores ----------
     def add_store(self, name: str, profile_dir: str):
         with self.connect() as conn:
