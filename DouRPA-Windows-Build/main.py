@@ -5,9 +5,10 @@ import sys
 from pathlib import Path
 
 from PySide6.QtGui import QFont, QIcon
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app.main_window_v211 import MainWindow
+from app.main_window_v212 import MainWindow
 from app.theme import APP_STYLESHEET
 
 
@@ -18,8 +19,13 @@ def resource_root() -> Path:
 
 
 def user_root() -> Path:
-    base = os.environ.get("LOCALAPPDATA")
-    root = Path(base) / "DouRPA" if base else Path.home() / "AppData" / "Local" / "DouRPA"
+    settings = QSettings("LocalOps", "DouRPA")
+    custom = str(settings.value("cache_root", "") or "").strip()
+    if custom:
+        root = Path(custom).expanduser()
+    else:
+        base = os.environ.get("LOCALAPPDATA")
+        root = Path(base) / "DouRPA" if base else Path.home() / "AppData" / "Local" / "DouRPA"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
