@@ -13,7 +13,7 @@ class PublishError(RuntimeError):
 
 
 class DouDianSimilarPublisher:
-    """抖店发布相似品 RPA - V2.0.7
+    """抖店发布相似品 RPA - V2.0.8
     核心修复：自动遍历主页面及所有 iframe。
     """
 
@@ -25,6 +25,7 @@ class DouDianSimilarPublisher:
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         self.selectors = json.loads(selector_file.read_text(encoding="utf-8"))
         self.step_cb = step_cb or (lambda _s, _p: None)
+        self._sku_verified = False
 
     def step(self, text: str, progress: int):
         self.step_cb(text, progress)
@@ -246,45 +247,84 @@ class DouDianSimilarPublisher:
 
         raise PublishError("未能定位“商品标题”输入框。 " + self.diagnostic_summary())
 
-    def _sku_value_input(self):
-        controls = self._visible_controls_in_ancestor("包装规格", exact=True)
-        scored = []
-        for box, ctl, depth in controls:
-            try:
-                placeholder = ctl.get_attribute("placeholder") or ""
-            except Exception:
-                placeholder = ""
-            try:
-                value = ctl.input_value().strip()
-            except Exception:
-                try:
-                    value = (ctl.inner_text() or "").strip()
-                except Exception:
-                    value = ""
-
-            if "新增规格" in placeholder or "新增规格值" in placeholder:
-                continue
-
-            score = 0
-            if value:
-                score += 200
-            if len(value) >= 4:
-                score += 100
-            if box["width"] >= 120:
-                score += 20
-            score -= depth
-            scored.append((score, ctl))
-
-        if scored:
-            scored.sort(key=lambda x: x[0], reverse=True)
-            return scored[0][1]
-
+    def _open_pack_spec_editor(self):
+        """按录屏中的正确路径打开“包装规格”的组合规格编辑浮层。"""
+        label = self._visible_text_locator("包装规格", exact=True, timeout_ms=15000)
         try:
-            return self.locator("sku_name_input", timeout=1200)
+            label.scroll_into_view_if_needed(timeout=2500)
         except Exception:
             pass
+        self.page.wait_for_timeout(350)
+        box = label.bounding_box()
+        if not box:
+            raise PublishError("无法获取“包装规格”位置。")
 
-        raise PublishError("未能定位“包装规格”已有规格值。 " + self.diagnostic_summary())
+        # 录屏中的正确动作：点击“包装规格”标题正下方的已有规格值胶囊，
+        # 而不是价格库存表格中的“价格”输入框。
+        x = box["x"] + max(70, min(120, box["width"] + 35))
+        y = box["y"] + box["height"] + 36
+        self.page.mouse.click(x, y)
+        self.page.wait_for_timeout(450)
+
+        try:
+            return self._visible_text_locator("选择规则", exact=True, timeout_ms=6000)
+        except Exception as exc:
+            raise PublishError(
+                "未打开包装规格组合编辑器。应点击包装规格下方已有规格值，而不是价格输入框。"
+            ) from exc
+
+    def _sku_value_input(self):
+        """只定位组合规格浮层里最左侧的‘名称’输入框，绝不回退到价格输入框。"""
+        rule = self._visible_text_locator("选择规则", exact=True, timeout_ms=6000)
+        rule_box = rule.bounding_box()
+        if not rule_box:
+            raise PublishError("无法获取“选择规则”浮层位置。")
+
+        candidates = []
+        for scope in self._scopes():
+            try:
+                inputs = scope.locator("input:not([type='hidden']):not([disabled])")
+                count = min(inputs.count(), 120)
+            except Exception:
+                continue
+
+            for i in range(count):
+                loc = inputs.nth(i)
+                try:
+                    if not loc.is_visible(timeout=250):
+                        continue
+                    box = loc.bounding_box()
+                    if not box:
+                        continue
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+
+                    # 浮层第一行位于“选择规则”下方约 20~110px。
+                    # 只允许这个小区域，彻底排除页面下方的“价格/库存”等输入框。
+                    if not (rule_box["x"] - 30 <= cx <= rule_box["x"] + 700):
+                        continue
+                    if not (rule_box["y"] + 20 <= cy <= rule_box["y"] + 120):
+                        continue
+
+                    placeholder = (loc.get_attribute("placeholder") or "").strip()
+                    if any(word in placeholder for word in (
+                        "价格", "库存", "商家编码", "条形码", "新增规格", "新增规格值"
+                    )):
+                        continue
+
+                    # 录屏中要改的是最左侧第一格：产品/SKU 名称；
+                    # 右侧的 100、抽、1、包全部保持原样。
+                    candidates.append((box["x"], box["y"], loc))
+                except Exception:
+                    continue
+
+        if candidates:
+            candidates.sort(key=lambda item: (item[0], item[1]))
+            return candidates[0][2]
+
+        raise PublishError(
+            "已打开包装规格编辑器，但未找到最左侧 SKU 名称输入框。" + self.diagnostic_summary()
+        )
 
     def _has_source_search(self, timeout=2200) -> bool:
         try:
@@ -621,49 +661,48 @@ class DouDianSimilarPublisher:
             ) from exc
 
     def replace_sku_name(self, sku_name: str):
+        self._sku_verified = False
         self.step("进入价格库存", 70)
         try:
             self._click_visible_text("价格库存", exact=True, timeout=6000)
         except Exception:
-            # 某些页面可通过滚动直接看到规格区，点不到 tab 时继续尝试。
             pass
         self.page.wait_for_timeout(900)
 
-        self.step("修改 SKU 名称", 74)
-        self._visible_text_locator("包装规格", exact=True, timeout_ms=15000)
+        self.step("打开包装规格编辑器", 73)
+        self._open_pack_spec_editor()
+
+        self.step("修改包装规格名称", 76)
+        loc = self._sku_value_input()
+        try:
+            loc.scroll_into_view_if_needed(timeout=1500)
+        except Exception:
+            pass
 
         try:
-            loc = self._sku_value_input()
-            try:
-                loc.scroll_into_view_if_needed(timeout=2000)
-            except Exception:
-                pass
-            try:
-                loc.fill("")
-                loc.fill(sku_name)
-            except Exception:
-                loc.click()
-                self.page.keyboard.press("Control+A")
-                self.page.keyboard.insert_text(sku_name)
+            loc.fill(sku_name, timeout=6000)
         except Exception:
-            # 根据实际录屏，“包装规格”的已有值位于标签下一行右侧。
-            self._keyboard_edit_near_label("包装规格", sku_name, x_offset=120, y_offset=42)
+            loc.click()
+            self.page.keyboard.press("Control+A")
+            self.page.wait_for_timeout(80)
+            self.page.keyboard.insert_text(sku_name)
 
-        if not self._visible_text_exists(sku_name, timeout_ms=3000):
-            try:
-                loc = self._sku_value_input()
-                value = self._read_editable_value(loc)
-                if value.strip() != sku_name.strip():
-                    raise PublishError(
-                        f"SKU 输入后未检测到新规格名。页面值={value!r}; {self.diagnostic_summary()}"
-                    )
-            except PublishError:
-                raise
-            except Exception:
-                raise PublishError(
-                    "SKU 输入动作已执行，但无法确认页面已更新。" + self.diagnostic_summary()
-                )
-        self.wait_page_ready(500)
+        self.page.wait_for_timeout(500)
+        value = self._read_editable_value(loc)
+        if value.strip() != sku_name.strip():
+            raise PublishError(
+                f"包装规格名称写入失败：目标={sku_name!r}，当前={value!r}。"
+                "已禁止回退到价格输入框，请勿手动继续发布。"
+            )
+        self._sku_verified = True
+
+        # 点击当前 tab 标题，让规格浮层失焦并提交组合值；
+        # 100 / 抽 / 1 / 包等其余组成部分保持源商品原值。
+        try:
+            self._click_visible_text("价格库存", exact=True, timeout=2500)
+        except Exception:
+            pass
+        self.page.wait_for_timeout(500)
 
     def _read_editable_value(self, loc):
         try:
@@ -686,19 +725,15 @@ class DouDianSimilarPublisher:
         if not title_ok:
             raise PublishError("发布前校验失败：未确认新标题已写入。")
 
-        sku_ok = self._visible_text_exists(expected_sku, timeout_ms=1800)
-        if not sku_ok:
-            try:
-                sku_ok = self._read_editable_value(self._sku_value_input()) == expected_sku.strip()
-            except Exception:
-                sku_ok = False
-        if not sku_ok:
-            raise PublishError("发布前校验失败：未确认新 SKU 名称已写入。")
+        # SKU 在 replace_sku_name 中已对“包装规格编辑浮层最左侧输入框”做精确值校验。
+        # 不再使用页面上任意可见文本/任意 input 做兜底，避免把“价格”误当成 SKU。
+        if not self._sku_verified:
+            raise PublishError("发布前校验失败：包装规格名称未通过精确校验。")
 
     def submit(self, safe_mode: bool):
         if safe_mode:
             self.step("已到发布前安全停点", 92)
-            return "待确认", "已完成标题、首图、SKU 修改，已停在最终发布前。"
+            return "待确认", "已完成标题、首图、包装规格名称修改，已停在最终发布前。"
 
         self.step("提交发布", 92)
         self.click("publish_button", timeout=12000)
